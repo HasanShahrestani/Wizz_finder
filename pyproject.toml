@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wizz-finder"
+version = "0.1.0"
+description = "Find cheap multi-leg routes that combine Wizz All You Can Fly legs with other airlines"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "airportsdata>=20240101",
+]
+
+[project.optional-dependencies]
+portal = ["playwright>=1.40"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+wizz-finder = "wizz_finder.cli:run"
+
+[tool.setuptools.packages.find]
+include = ["wizz_finder*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
