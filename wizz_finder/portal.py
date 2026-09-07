@@ -67,6 +67,21 @@ def looks_like_unknown_subscription(status: int, text: str) -> bool:
     return "notfound" in str(payload.get("code", "")).lower()
 
 
+def means_nothing_available(status: int, text: str) -> bool:
+    """Is the portal saying this route and day has no All You Can Fly seat?
+
+    It answers 400 {"code": "error.availability"} for a route-day with nothing on offer,
+    which is an answer rather than a fault: the check is done and came back empty.
+    """
+    if status != 400:
+        return False
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(payload, dict) and str(payload.get("code", "")).startswith("error.availability")
+
+
 WRONG_ID_HELP = (
     "The portal does not recognise that subscription id (it answered notFound).\n"
     "It is almost certainly a different UUID copied off the portal: the cookie-consent\n"
@@ -260,6 +275,12 @@ class PortalAvailability:
 
         if looks_like_unknown_subscription(result["status"], result["text"]):
             raise RuntimeError(WRONG_ID_HELP)
+
+        if means_nothing_available(result["status"], result["text"]):
+            self._failures = 0
+            if self.verbose:
+                print(f"      nothing available {origin} -> {dest} on {day}", flush=True)
+            return {"flightsOutbound": [], "flightsInbound": []}
 
         payload = None
         problem = None

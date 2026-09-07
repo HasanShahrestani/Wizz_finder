@@ -12,7 +12,7 @@ from . import airports
 from .availability import CombinedAvailability, FileAvailability, NoAvailability
 from .envfile import load_env, mask, read_env, set_env_value
 from .aycf_routes import load_network
-from .fares import FileFares, RyanairFares
+from .fares import FileFares, build_providers
 from .models import Itinerary, PlanResult
 from .planner import Planner, SearchOptions
 
@@ -36,12 +36,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--headed", action="store_true", help="show the browser used for --portal")
     p.add_argument("--portal-delay", type=float, default=2.0, help="seconds between portal requests")
     p.add_argument("--fares", type=Path, help="JSON file with fares you looked up by hand")
-    p.add_argument("--no-ryanair", action="store_true", help="skip the Ryanair fare lookup")
+    p.add_argument("--fare-source", default="auto",
+                   help="comma list of fare sources: ryanair, kiwi, amadeus (default: auto, "
+                        "which is ryanair plus any whose keys are in .env). 'none' for no lookups")
+    p.add_argument("--no-ryanair", action="store_true", help="shorthand for --fare-source none")
     p.add_argument("--currency", default="GBP")
     p.add_argument("--aycf-fee", type=float, default=9.99, help="flat fee per AYCF leg")
     p.add_argument("--min-connect", type=float, default=3.0, help="minimum self-transfer time, hours")
     p.add_argument("--max-layover", type=float, default=8.0, help="maximum layover, hours")
     p.add_argument("--max-handoffs", type=int, default=10, help="hand-off airports to consider per skeleton")
+    p.add_argument("--max-checks", type=int, default=20,
+                   help="most AYCF availability checks to make, best prospects first")
+    p.add_argument("--max-fare-lookups", type=int, default=40,
+                   help="most fare lookups to make across all sources")
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--refresh", action="store_true", help="re-download the route network")
@@ -195,11 +202,17 @@ def cmd_search(args) -> int:
             print(f"Unknown airport code: {code}", file=sys.stderr)
             return 2
 
-    fares = []
-    if not args.no_ryanair:
-        fares.append(RyanairFares(currency=args.currency))
+    try:
+        fares, notes = build_providers(_fare_sources(args), args.currency)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     if args.fares:
         fares.append(FileFares(args.fares, args.currency))
+    for note in notes:
+        print(f"Skipping fare source: {note}", file=sys.stderr)
+    if fares:
+        print(f"Fare sources: {', '.join(f.name for f in fares)}")
     providers = []
     if args.availability:
         providers.append(FileAvailability(args.availability, args.aycf_fee, args.currency))
@@ -225,6 +238,9 @@ def _run_search(args, net, origins, dests, fares, availability) -> int:
         min_connect_hours=args.min_connect,
         max_layover_hours=args.max_layover,
         max_handoffs=args.max_handoffs,
+        max_checks=args.max_checks,
+        max_fare_lookups=args.max_fare_lookups,
+        aycf_fee=args.aycf_fee,
         top=args.top,
     )
     planner = Planner(net, fares, availability, options)
@@ -235,6 +251,20 @@ def _run_search(args, net, origins, dests, fares, availability) -> int:
     else:
         _print(result, origins, dests, args.date, availability_given=args.availability is not None or args.portal)
     return 0
+
+
+def _fare_sources(args) -> list[str]:
+    """Work out which fare sources to use from --fare-source and what .env holds."""
+    if args.no_ryanair or args.fare_source.strip().lower() in {"none", ""}:
+        return []
+    if args.fare_source.strip().lower() != "auto":
+        return [n.strip().lower() for n in args.fare_source.split(",") if n.strip()]
+    sources = ["ryanair"]
+    if os.environ.get("KIWI_API_KEY"):
+        sources.append("kiwi")
+    if os.environ.get("AMADEUS_CLIENT_ID") and os.environ.get("AMADEUS_CLIENT_SECRET"):
+        sources.append("amadeus")
+    return sources
 
 
 def _expand(codes: list[str], radius_km: float, net) -> list[str]:
@@ -253,7 +283,14 @@ def _fmt_td(td) -> str:
 def _print(result: PlanResult, origins, dests, day, availability_given: bool) -> None:
     print(f"Search {','.join(origins)} -> {','.join(dests)} on {day:%a %d %b %Y}")
     print(f"  fare lookups: {result.fare_lookups}, AYCF checks known: {result.checks_done}, "
-          f"unknown: {len(result.unknown_checks)}\n")
+          f"unknown: {len(result.unknown_checks)}")
+    if result.fare_lookups_skipped:
+        print(f"  {result.fare_lookups_skipped} fare lookups skipped by the lookup budget; "
+              f"raise it with --max-fare-lookups")
+    if result.skipped_groups:
+        print(f"  {result.skipped_groups} further route combinations left unchecked by the check "
+              f"budget; raise it with --max-checks")
+    print()
 
     if result.itineraries:
         print("Options (cheapest first):")

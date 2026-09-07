@@ -25,10 +25,13 @@ AYCF route map  (public Multipass plans endpoint, cached 7 days)
 hand-off airports ranked by geographic detour, top N kept
         │
         ▼
-fares for the non-AYCF legs  (Ryanair fare finder, cheapest per day; or a hand-made file)
+fares for the non-AYCF legs  (Ryanair, Kiwi, Amadeus, or a hand-made file)
         │  AYCF checks are only listed where a partner fare exists
         ▼
-AYCF availability  (your answers from the portal, in a JSON file)
+skeletons ranked cheapest-first, checks capped by a budget
+        │
+        ▼
+AYCF availability  (live from the portal, or your answers in a JSON file)
         │
         ▼
 combine → connection filter → rank by price, then duration → top options
@@ -84,10 +87,41 @@ Output is a ranked list of options; you pick. Useful flags:
 | `--max-layover` | 8.0 | maximum layover in hours |
 | `--near-from`, `--near-to` | 0 | also consider AYCF airports within N km |
 | `--max-handoffs` | 10 | hand-off airports tried per skeleton |
-| `--fares fares.json` | | add fares you looked up by hand (easyJet, Jet2, ...) |
-| `--no-ryanair` | | skip the live Ryanair lookup |
+| `--max-checks` | 20 | most AYCF checks per run, best prospects first |
+| `--max-fare-lookups` | 40 | most fare lookups per run |
+| `--fare-source` | auto | which fare sources to use (see below) |
+| `--fares fares.json` | | add fares you looked up by hand |
 | `--aycf-fee` | 9.99 | flat fee per AYCF leg |
 | `--json` | | machine-readable output |
+
+## Fare sources
+
+Ryanair needs no key and is always available. The others widen the search to the rest of
+the market; put a key in `.env` and it is picked up automatically.
+
+| source | key needed | coverage |
+|---|---|---|
+| `ryanair` | none | Ryanair only, cheapest flight per day |
+| `kiwi` | `KIWI_API_KEY` | most airlines including low-cost, per day |
+| `amadeus` | `AMADEUS_CLIENT_ID` / `_SECRET` | broad airline coverage, free tier |
+
+```bash
+wizz-finder search ... --fare-source ryanair,kiwi   # pick explicitly
+wizz-finder search ... --fare-source none           # AYCF legs only
+```
+
+`--fare-source auto`, the default, uses Ryanair plus whichever of the others have keys.
+The run prints which sources are active and says when a key is missing. Only nonstop
+fares are used, because the tool builds the connections itself.
+
+## Budgets
+
+An AYCF check takes a couple of seconds and a fare lookup may cost an API call, so both
+are capped. Skeletons are tried cheapest-first: a direct AYCF leg (£10), then two AYCF
+legs (£20), then combinations with a cash leg ordered by that fare, with the shortest
+detour winning ties. A skeleton is checked whole or not at all, since half its checks
+answer nothing. When a budget binds, the run says how much it left out and which flag
+raises it.
 
 ## Live availability (`--portal`)
 
@@ -169,8 +203,9 @@ appear, so the output is safe to paste into a bug report.
 ## Limits of this version
 
 - Two legs at most, same-airport connections only.
-- Ryanair is the only automatic fare source, and it returns the cheapest flight per day,
-  not every flight. Add other airlines through `--fares`.
+- Ryanair returns only the cheapest flight per day, not every flight.
+- The Kiwi and Amadeus providers are written to their documented APIs and their parsers
+  are unit-tested, but neither has been run against a live account yet.
 - The live portal check has been built from a recorded session and unit-tested against
   it, but the automatic login form fill and the "no flights" response have not been
   exercised end to end. If something changes on the portal, `wizz-finder record-portal`

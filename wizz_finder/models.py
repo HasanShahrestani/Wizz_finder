@@ -73,10 +73,19 @@ class AycfCheck:
 
 @dataclass
 class CheckGroup:
-    """The AYCF checks one skeleton needs, e.g. 'Two AYCF legs via BUD'."""
+    """The AYCF checks one skeleton needs, e.g. 'Two AYCF legs via BUD'.
+
+    est_cost is what the skeleton would cost if every leg came through, and detour is
+    how far off the direct line it goes. Together they order the checks worth making.
+    """
 
     label: str
     checks: list[AycfCheck]
+    est_cost: float = 0.0
+    detour: float = 1.0
+
+    def rank(self) -> tuple[float, float]:
+        return (round(self.est_cost, 2), self.detour)
 
 
 @dataclass
@@ -86,3 +95,5 @@ class PlanResult:
     unknown_groups: list[CheckGroup] = field(default_factory=list)
     checks_done: int = 0
     fare_lookups: int = 0
+    fare_lookups_skipped: int = 0
+    skipped_groups: int = 0

@@ -150,3 +150,50 @@ def test_parse_plans_prefers_unlimited_plan():
 def test_nearby_uses_only_network_stations():
     near = airports.nearby("LTN", 100, {"STN", "LGW", "BUD"})
     assert "STN" in near and "LGW" in near and "BUD" not in near
+
+
+# ---- check and lookup budgets --------------------------------------------------
+
+def test_budget_keeps_the_cheapest_prospects_first():
+    fares = FakeFares([
+        flight("LTN", "BUD", "05:55", "09:20", "FR", 20.0),   # BUD hand-off: cheap
+        flight("LTN", "SOF", "06:00", "10:00", "FR", 250.0),  # SOF hand-off: dear
+    ])
+    planner = Planner(NET, [fares], NoAvailability(), SearchOptions(max_checks=3))
+    res = planner.plan(["LTN"], ["TIA"], DAY)
+    assert len(res.unknown_checks) <= 3
+    labels = [g.label for g in res.unknown_groups]
+    assert labels[0].startswith("Two AYCF legs")  # 19.98 beats anything with a cash leg
+    assert res.skipped_groups > 0
+
+
+def test_budget_never_splits_a_skeleton():
+    planner = Planner(NET, [FakeFares([])], NoAvailability(), SearchOptions(max_checks=2))
+    res = planner.plan(["LTN"], ["TIA"], DAY)
+    # LTN->TIA is not an AYCF route, so every group here needs three checks and none fit
+    assert res.unknown_checks == []
+    assert res.skipped_groups > 0
+
+
+def test_a_generous_budget_checks_everything():
+    planner = Planner(NET, [FakeFares([])], NoAvailability(), SearchOptions(max_checks=100))
+    res = planner.plan(["LTN"], ["TIA"], DAY)
+    assert res.skipped_groups == 0 and len(res.unknown_checks) == 6  # via BUD and via SOF
+
+
+def test_fare_lookup_budget_stops_further_lookups():
+    fares = FakeFares([])
+    planner = Planner(NET, [fares], NoAvailability(), SearchOptions(max_fare_lookups=2))
+    res = planner.plan(["LTN"], ["TIA"], DAY)
+    assert res.fare_lookups == 2
+    assert res.fare_lookups_skipped > 0
+    assert len(fares.calls) == 2
+
+
+def test_cached_fares_do_not_spend_the_budget_twice():
+    fares = FakeFares([flight("LTN", "BUD", "05:55", "09:20", "FR", 20.0)])
+    planner = Planner(NET, [fares], NoAvailability(), SearchOptions(max_fare_lookups=50))
+    planner.plan(["LTN"], ["TIA"], DAY)
+    before = planner.fare_lookups
+    planner.plan(["LTN"], ["TIA"], DAY)
+    assert planner.fare_lookups == before  # second run answered entirely from the cache

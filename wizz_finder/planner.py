@@ -29,6 +29,9 @@ class SearchOptions:
     max_layover_hours: float = 8.0
     max_handoffs: int = 10
     max_detour_ratio: float = 2.5
+    max_checks: int = 20
+    max_fare_lookups: int = 40
+    aycf_fee: float = 9.99
     top: int = 10
     include_direct_other: bool = True
 
@@ -44,6 +47,7 @@ class Planner:
         self._fare_cache: dict[tuple[str, str, date, date], list[Flight]] = {}
         self._avail_cache: dict[AycfCheck, list[Flight] | None] = {}
         self.fare_lookups = 0
+        self.fare_lookups_skipped = 0
 
     # ---- public -----------------------------------------------------------
 
@@ -57,7 +61,8 @@ class Planner:
                 continue
             # 1. direct AYCF
             if self.network.has(o, d):
-                groups.append(CheckGroup(f"Direct AYCF {o} -> {d}", [AycfCheck(o, d, day)]))
+                groups.append(CheckGroup(f"Direct AYCF {o} -> {d}", [AycfCheck(o, d, day)],
+                                         est_cost=self.options.aycf_fee, detour=1.0))
             # 2. direct other airline
             if self.options.include_direct_other:
                 itins += [Itinerary([f]) for f in self._fares(o, d, day, day)]
@@ -66,6 +71,8 @@ class Planner:
                 groups.append(CheckGroup(
                     f"Two AYCF legs {o} -> {h} -> {d}",
                     [AycfCheck(o, h, day), AycfCheck(h, d, day), AycfCheck(h, d, next_day)],
+                    est_cost=2 * self.options.aycf_fee,
+                    detour=airports.detour_ratio(o, h, d),
                 ))
             # 4. other + AYCF: fares first, check AYCF only where a fare exists
             for h in self._rank(o, d, self.network.origins(d) - {o}):
@@ -74,13 +81,20 @@ class Planner:
                     groups.append(CheckGroup(
                         f"After {_cheapest(fares)} then AYCF",
                         [AycfCheck(h, d, day), AycfCheck(h, d, next_day)],
+                        est_cost=min(f.price for f in fares) + self.options.aycf_fee,
+                        detour=airports.detour_ratio(o, h, d),
                     ))
             # 5. AYCF + other: fares first as well
             for h in self._rank(o, d, self.network.destinations(o) - {d}):
                 fares = self._fares(h, d, day, next_day)
                 if fares:
-                    groups.append(CheckGroup(f"AYCF then {_cheapest(fares)}", [AycfCheck(o, h, day)]))
+                    groups.append(CheckGroup(
+                        f"AYCF then {_cheapest(fares)}", [AycfCheck(o, h, day)],
+                        est_cost=self.options.aycf_fee + min(f.price for f in fares),
+                        detour=airports.detour_ratio(o, h, d),
+                    ))
 
+        groups, skipped = self._within_budget(groups)
         needed = list(dict.fromkeys(c for g in groups for c in g.checks))
         unknown = [c for c in needed if self._avail(c) is None]
         unknown_set = set(unknown)
@@ -114,9 +128,30 @@ class Planner:
             unknown_groups=unknown_groups,
             checks_done=len(needed) - len(unknown),
             fare_lookups=self.fare_lookups,
+            fare_lookups_skipped=self.fare_lookups_skipped,
+            skipped_groups=skipped,
         )
 
     # ---- helpers ----------------------------------------------------------
+
+    def _within_budget(self, groups: list[CheckGroup]) -> tuple[list[CheckGroup], int]:
+        """Keep the most promising skeletons whose checks fit the budget.
+
+        Cheapest-if-it-works first, then least detour. A skeleton is kept whole or not at
+        all, since half its checks answer nothing.
+        """
+        budget = self.options.max_checks
+        kept: list[CheckGroup] = []
+        planned: dict[AycfCheck, None] = {}
+        skipped = 0
+        for group in sorted(groups, key=CheckGroup.rank):
+            would_add = [c for c in group.checks if c not in planned]
+            if len(planned) + len(would_add) > budget:
+                skipped += 1
+                continue
+            planned.update(dict.fromkeys(would_add))
+            kept.append(group)
+        return kept, skipped
 
     def _rank(self, o: str, d: str, candidates: set[str]) -> list[str]:
         scored = sorted(
@@ -126,13 +161,17 @@ class Planner:
 
     def _fares(self, o: str, d: str, day_from: date, day_to: date) -> list[Flight]:
         key = (o, d, day_from, day_to)
-        if key not in self._fare_cache:
-            found: list[Flight] = []
-            for provider in self.fares:
-                self.fare_lookups += 1
-                found += provider.search(o, d, day_from, day_to)
-            self._fare_cache[key] = found
-        return self._fare_cache[key]
+        if key in self._fare_cache:
+            return self._fare_cache[key]
+        if self.fare_lookups >= self.options.max_fare_lookups:
+            self.fare_lookups_skipped += 1
+            return []
+        found: list[Flight] = []
+        for provider in self.fares:
+            self.fare_lookups += 1
+            found += provider.search(o, d, day_from, day_to)
+        self._fare_cache[key] = found
+        return found
 
     def _fares_if_looked_up(self, o: str, d: str, day_from: date, day_to: date) -> list[Flight]:
         return self._fare_cache.get((o, d, day_from, day_to), [])

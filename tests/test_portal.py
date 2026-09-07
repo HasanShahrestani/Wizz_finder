@@ -219,3 +219,34 @@ def test_wrong_id_stops_immediately_with_an_explanation(monkeypatch):
     with pytest.raises(RuntimeError, match="does not recognise that subscription id"):
         p.available_flights(AycfCheck("LTN", "BUD", date(2026, 9, 8)))
     assert p._page.posts == 1  # no retrying, no working through the check list
+
+
+# ---- "nothing available" is an answer, not a failure ---------------------------
+
+from wizz_finder.portal import means_nothing_available
+
+NO_AVAIL = {"status": 400, "text": json.dumps({"code": "error.availability",
+                                               "message": "error.availability"})}
+
+
+def test_error_availability_is_recognised():
+    assert means_nothing_available(400, NO_AVAIL["text"])
+    assert not means_nothing_available(400, json.dumps({"code": "notFound"}))
+    assert not means_nothing_available(200, json.dumps(FIXTURE))
+    assert not means_nothing_available(400, "<html>nope</html>")
+
+
+def test_nothing_available_counts_as_checked(monkeypatch):
+    p = _provider([NO_AVAIL])
+    monkeypatch.setattr(p, "_log_in", lambda: pytest.fail("not a login problem"))
+    monkeypatch.setattr(p, "_save_cache", lambda: None)
+    # [] means "checked, nothing there"; None would mean "still unknown"
+    assert p.available_flights(AycfCheck("LTN", "PRG", date(2026, 9, 8))) == []
+
+
+def test_nothing_available_does_not_count_towards_the_failure_limit(monkeypatch):
+    p = _provider([NO_AVAIL] * 4, max_failures=2)
+    monkeypatch.setattr(p, "_log_in", lambda: pytest.fail("not a login problem"))
+    monkeypatch.setattr(p, "_save_cache", lambda: None)
+    for _ in range(4):
+        assert p.available_flights(AycfCheck("LTN", "PRG", date(2026, 9, 8))) == []

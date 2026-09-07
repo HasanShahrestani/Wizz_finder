@@ -6,6 +6,7 @@ and what do they cost. Providers may return only the cheapest flight per day.
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,21 @@ class FareProvider(Protocol):
     name: str
 
     def search(self, origin: str, dest: str, day_from: date, day_to: date) -> list[Flight]: ...
+
+
+def _cached_json(cache: Path, ttl_seconds: float, fetch) -> dict | None:
+    """Read a cached JSON answer, or fetch and store one. None when the fetch failed."""
+    if cache.exists() and time.time() - cache.stat().st_mtime < ttl_seconds:
+        try:
+            return json.loads(cache.read_text())
+        except json.JSONDecodeError:
+            pass
+    payload = fetch()
+    if payload is None:
+        return None
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(payload))
+    return payload
 
 
 class RyanairFares:
@@ -131,3 +147,209 @@ def _months(day_from: date, day_to: date) -> list[date]:
         months.append(cur)
         cur = (cur + timedelta(days=32)).replace(day=1)
     return months
+
+
+class KiwiFares:
+    """Kiwi.com (Tequila) search: nonstop fares across most airlines, low-cost included.
+
+    Needs a Tequila API key in KIWI_API_KEY. One request per route and day.
+    """
+
+    name = "kiwi"
+    URL = "https://tequila-api.kiwi.com/v2/search"
+
+    def __init__(self, api_key: str, currency: str = "GBP",
+                 cache_dir: Path = Path(".cache/kiwi"), ttl_hours: float = 6, limit: int = 20):
+        self.api_key, self.currency, self.limit = api_key, currency, limit
+        self.cache_dir, self.ttl = cache_dir, ttl_hours * 3600
+        self.requests_made = 0
+
+    def search(self, origin: str, dest: str, day_from: date, day_to: date) -> list[Flight]:
+        flights: list[Flight] = []
+        for day in _days(day_from, day_to):
+            payload = _cached_json(
+                self.cache_dir / f"{origin}-{dest}-{day}-{self.currency}.json",
+                self.ttl,
+                lambda d=day: self._fetch(origin, dest, d),
+            )
+            if payload:
+                flights.extend(parse_kiwi(payload, self.currency))
+        return flights
+
+    def _fetch(self, origin: str, dest: str, day: date) -> dict | None:
+        params = {
+            "fly_from": origin, "fly_to": dest,
+            "date_from": day.strftime("%d/%m/%Y"), "date_to": day.strftime("%d/%m/%Y"),
+            "adults": 1, "curr": self.currency, "max_stopovers": 0, "limit": self.limit,
+            "vehicle_type": "aircraft",
+        }
+        self.requests_made += 1
+        try:
+            resp = requests.get(self.URL, params=params, headers={"apikey": self.api_key}, timeout=30)
+        except requests.RequestException:
+            return None
+        if resp.status_code == 401:
+            raise RuntimeError("Kiwi rejected KIWI_API_KEY (401). Check the key in .env.")
+        if resp.status_code != 200:
+            return {}
+        return resp.json()
+
+
+def parse_kiwi(payload: dict, currency: str) -> list[Flight]:
+    flights: list[Flight] = []
+    for offer in payload.get("data", []):
+        legs = offer.get("route") or []
+        if len(legs) != 1:  # we build our own connections, so only nonstop is useful
+            continue
+        leg = legs[0]
+        o, d = leg["flyFrom"], leg["flyTo"]
+        flights.append(Flight(
+            origin=o, dest=d,
+            dep=airports.localize(_iso_naive(leg["local_departure"]), o),
+            arr=airports.localize(_iso_naive(leg["local_arrival"]), d),
+            carrier=leg.get("airline", "??"),
+            flight_no=f"{leg.get('airline', '')}{leg.get('flight_no', '')}",
+            price=float(offer["price"]),
+            currency=payload.get("currency", currency),
+        ))
+    return flights
+
+
+class AmadeusFares:
+    """Amadeus Self-Service flight offers: broad airline coverage on a free tier.
+
+    Needs AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET. Set AMADEUS_ENV=production to
+    use the live host instead of the test one, which carries only sample data.
+    """
+
+    name = "amadeus"
+    HOSTS = {"test": "https://test.api.amadeus.com", "production": "https://api.amadeus.com"}
+
+    def __init__(self, client_id: str, client_secret: str, currency: str = "GBP",
+                 environment: str = "test", cache_dir: Path = Path(".cache/amadeus"),
+                 ttl_hours: float = 6, limit: int = 20):
+        self.client_id, self.client_secret = client_id, client_secret
+        self.currency, self.limit = currency, limit
+        self.host = self.HOSTS.get(environment, self.HOSTS["test"])
+        self.cache_dir, self.ttl = cache_dir, ttl_hours * 3600
+        self.requests_made = 0
+        self._token: str | None = None
+        self._token_expires = 0.0
+
+    def search(self, origin: str, dest: str, day_from: date, day_to: date) -> list[Flight]:
+        flights: list[Flight] = []
+        for day in _days(day_from, day_to):
+            payload = _cached_json(
+                self.cache_dir / f"{origin}-{dest}-{day}-{self.currency}.json",
+                self.ttl,
+                lambda d=day: self._fetch(origin, dest, d),
+            )
+            if payload:
+                flights.extend(parse_amadeus(payload, self.currency))
+        return flights
+
+    def _access_token(self) -> str:
+        if self._token and time.time() < self._token_expires:
+            return self._token
+        resp = requests.post(
+            f"{self.host}/v1/security/oauth2/token",
+            data={"grant_type": "client_credentials",
+                  "client_id": self.client_id, "client_secret": self.client_secret},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Amadeus refused the credentials (HTTP {resp.status_code}). "
+                "Check AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET in .env."
+            )
+        data = resp.json()
+        self._token = data["access_token"]
+        self._token_expires = time.time() + float(data.get("expires_in", 1800)) - 60
+        return self._token
+
+    def _fetch(self, origin: str, dest: str, day: date) -> dict | None:
+        params = {
+            "originLocationCode": origin, "destinationLocationCode": dest,
+            "departureDate": day.isoformat(), "adults": 1,
+            "currencyCode": self.currency, "nonStop": "true", "max": self.limit,
+        }
+        self.requests_made += 1
+        try:
+            resp = requests.get(
+                f"{self.host}/v2/shopping/flight-offers",
+                params=params,
+                headers={"Authorization": f"Bearer {self._access_token()}"},
+                timeout=30,
+            )
+        except requests.RequestException:
+            return None
+        if resp.status_code != 200:
+            return {}
+        return resp.json()
+
+
+def parse_amadeus(payload: dict, currency: str) -> list[Flight]:
+    flights: list[Flight] = []
+    for offer in payload.get("data", []):
+        price = offer.get("price", {})
+        total = price.get("grandTotal") or price.get("total")
+        for itinerary in offer.get("itineraries", []):
+            segments = itinerary.get("segments", [])
+            if len(segments) != 1:  # nonstop only; we build connections ourselves
+                continue
+            seg = segments[0]
+            o, d = seg["departure"]["iataCode"], seg["arrival"]["iataCode"]
+            flights.append(Flight(
+                origin=o, dest=d,
+                dep=airports.localize(_iso_naive(seg["departure"]["at"]), o),
+                arr=airports.localize(_iso_naive(seg["arrival"]["at"]), d),
+                carrier=seg.get("carrierCode", "??"),
+                flight_no=f"{seg.get('carrierCode', '')}{seg.get('number', '')}",
+                price=float(total),
+                currency=price.get("currency", currency),
+            ))
+    return flights
+
+
+def _iso_naive(text: str) -> datetime:
+    """Parse an ISO timestamp as wall-clock time, ignoring any trailing zone marker.
+
+    Kiwi labels local times with a Z and Amadeus sends none at all; both mean local.
+    """
+    cleaned = text.strip().replace("Z", "").split("+")[0]
+    if "." in cleaned:
+        cleaned = cleaned.split(".")[0]
+    return datetime.fromisoformat(cleaned)
+
+
+def _days(day_from: date, day_to: date) -> list[date]:
+    span = (day_to - day_from).days
+    return [day_from + timedelta(days=i) for i in range(max(span, 0) + 1)]
+
+
+PROVIDERS = {"ryanair": RyanairFares, "kiwi": KiwiFares, "amadeus": AmadeusFares}
+
+
+def build_providers(names: list[str], currency: str) -> tuple[list[FareProvider], list[str]]:
+    """Make the named providers. Returns them plus notes about any that were skipped."""
+    built: list[FareProvider] = []
+    notes: list[str] = []
+    for name in names:
+        if name == "ryanair":
+            built.append(RyanairFares(currency=currency))
+        elif name == "kiwi":
+            key = os.environ.get("KIWI_API_KEY")
+            if key:
+                built.append(KiwiFares(api_key=key, currency=currency))
+            else:
+                notes.append("kiwi needs KIWI_API_KEY in .env")
+        elif name == "amadeus":
+            cid, secret = os.environ.get("AMADEUS_CLIENT_ID"), os.environ.get("AMADEUS_CLIENT_SECRET")
+            if cid and secret:
+                built.append(AmadeusFares(client_id=cid, client_secret=secret, currency=currency,
+                                          environment=os.environ.get("AMADEUS_ENV", "test")))
+            else:
+                notes.append("amadeus needs AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET in .env")
+        else:
+            raise ValueError(f"Unknown fare source {name!r}. Known: {', '.join(sorted(PROVIDERS))}, file")
+    return built, notes
