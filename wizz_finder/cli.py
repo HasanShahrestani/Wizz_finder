@@ -115,15 +115,40 @@ def cmd_probe(args) -> int:
     return 1
 
 
+def _suggest_recordings(missing: Path, limit: int = 5) -> None:
+    """Point at recordings that do exist, since a doubled or wrong path is the usual slip."""
+    seen: list[Path] = []
+    for candidate in [Path(missing.name), Path("portal_recordings") / missing.name]:
+        if candidate.is_file() and candidate != missing:
+            seen.append(candidate)
+    for directory in [Path("."), Path("portal_recordings"), Path("..")]:
+        for found in sorted(directory.glob("*.jsonl")):
+            if found.is_file() and found not in seen and found != missing:
+                seen.append(found)
+    if not seen:
+        print("No .jsonl recordings found nearby either. Make one with `wizz-finder record-portal`,",
+              file=sys.stderr)
+        print("logging in and searching one route before you close the browser.", file=sys.stderr)
+        return
+    print("\nDid you mean one of these?", file=sys.stderr)
+    for found in seen[:limit]:
+        print(f"  wizz-finder subscription-id --from-recording {found}", file=sys.stderr)
+
+
 def cmd_subscription_id(args) -> int:
     from .portal import UUID_RE, subscription_id_from_recording
 
     value = args.value
     if args.from_recording:
-        value = subscription_id_from_recording(args.from_recording)
+        path = args.from_recording
+        if not path.is_file():
+            print(f"No such file: {path}", file=sys.stderr)
+            _suggest_recordings(path)
+            return 1
+        value = subscription_id_from_recording(path)
         if not value:
-            print(f"No subscription id found in {args.from_recording}.", file=sys.stderr)
-            print("A recording only contains it if you ran a search while recording.", file=sys.stderr)
+            print(f"{path} holds no .../json/availability/<id> request.", file=sys.stderr)
+            print("A recording only contains the id if you ran a search while recording.", file=sys.stderr)
             return 1
     if value:
         if not UUID_RE.match(value):
