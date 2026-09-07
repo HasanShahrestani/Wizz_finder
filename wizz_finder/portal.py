@@ -29,6 +29,26 @@ SUB_ID_RE = re.compile(r"json/availability/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
+AUTH_STATUSES = {401, 403, 419, 440}
+
+
+def looks_like_auth_failure(status: int, text: str) -> bool:
+    """Did the portal reject this because we are not logged in?
+
+    A logged-out portal answers with an auth status, or with the login page's HTML, or
+    with JSON carrying a redirectUri pointing at the login flow.
+    """
+    if status in AUTH_STATUSES:
+        return True
+    if text.lstrip().startswith("<"):
+        return True
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return isinstance(payload, dict) and bool(payload.get("redirectUri"))
+
+
 def parse_availability(payload: dict, origin: str, dest: str, fee: float, currency: str) -> list[Flight]:
     flights: list[Flight] = []
     for entry in payload.get("flightsOutbound") or []:
@@ -67,12 +87,16 @@ class PortalAvailability:
         profile_dir: Path = PROFILE_DIR,
         cache_path: Path = CACHE_PATH,
         cache_ttl_minutes: float = 30,
+        login_timeout: float = 300,
+        verbose: bool = True,
     ):
         self.fee, self.currency = fee, currency
         self.subscription_id = subscription_id
         self.email, self.password = email, password
         self.headless, self.delay = headless, delay_seconds
         self.profile_dir, self.cache_path, self.ttl = profile_dir, cache_path, cache_ttl_minutes * 60
+        self.login_timeout = login_timeout
+        self.verbose = verbose
         self.requests_made = 0
         self._cache = self._load_cache()
         self._pw = self._browser = self._page = None
@@ -93,72 +117,82 @@ class PortalAvailability:
         self._pw = self._browser = self._page = None
 
     def _open(self):
+        """Launch the browser on the portal. Does not verify the login: the search does that."""
         if self._page:
             return self._page
-        from playwright.sync_api import sync_playwright
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "Playwright is not installed. Run: pip install playwright && playwright install chromium"
+            ) from exc
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch_persistent_context(str(self.profile_dir), headless=self.headless)
         self._page = self._browser.pages[0] if self._browser.pages else self._browser.new_page()
         self._page.goto(PORTAL_URL, wait_until="domcontentloaded")
-        self._ensure_logged_in()
-        if not self.subscription_id:
-            self.subscription_id = self._discover_subscription_id()
         return self._page
+
+    # ---- subscription id --------------------------------------------------
+
+    def _ensure_subscription_id(self) -> str:
+        if self.subscription_id:
+            if not UUID_RE.match(self.subscription_id):
+                raise RuntimeError(
+                    f"WIZZ_SUBSCRIPTION_ID does not look like an id: {self.subscription_id!r}\n"
+                    "It should look like 1a2b3c4d-1234-5678-9abc-1a2b3c4d5e6f."
+                )
+            return self.subscription_id
+        found = _scrape_subscription_id(self._page)
+        if found:
+            self.subscription_id = found
+            return found
+        raise RuntimeError(
+            "No subscription id. The portal only reveals it when it runs a search, so:\n"
+            "  wizz-finder login          then log in and search any route once\n"
+            "  wizz-finder subscription-id   shows the other ways to set it"
+        )
 
     # ---- login ------------------------------------------------------------
 
-    def _logged_in(self) -> bool:
+    def _log_in(self) -> None:
+        """Called only after the portal has actually rejected a search."""
         page = self._page
-        if "openid-connect" in page.url or "login-actions" in page.url:
-            return False
-        return bool(page.evaluate("() => (window.CVO && window.CVO.hasUserInfo) || false"))
-
-    def _ensure_logged_in(self) -> None:
-        page = self._page
-        if self._logged_in():
-            return
-        if "openid-connect" not in page.url and "login-actions" not in page.url:
-            page.goto(PORTAL_URL + "/auth/login", wait_until="domcontentloaded")
+        page.goto(PORTAL_URL + "/auth/login", wait_until="domcontentloaded")
         if self.email and self.password:
             self._fill_login_form()
-        elif self.headless:
+            page.wait_for_url(lambda url: "openid-connect" not in url and "login-actions" not in url,
+                              timeout=60000)
+            page.wait_for_load_state("domcontentloaded")
+            return
+        if self.headless:
             raise RuntimeError(
-                "Not logged in to the Multipass portal. Either run `wizz-finder login` once "
-                "(interactive browser) or set WIZZ_EMAIL and WIZZ_PASSWORD in .env."
+                "Not logged in to the Multipass portal (it rejected the search).\n"
+                "Fix it in one of these ways:\n"
+                "  wizz-finder login                       log in once in a visible browser\n"
+                "  wizz-finder search ... --portal --headed  log in as part of this run\n"
+                "  put WIZZ_EMAIL and WIZZ_PASSWORD in .env for an automatic login"
             )
-        else:
-            print("Log in to the Multipass portal in the browser window...")
-        self._wait_until_logged_in()
+        print("\nThe portal is not logged in. Please log in in the browser window; "
+              "the search continues by itself once you are through.")
+        deadline = time.time() + self.login_timeout
+        while time.time() < deadline:
+            page.wait_for_timeout(1000)
+            url = page.url
+            if "openid-connect" not in url and "login-actions" not in url and "multipass.wizzair.com" in url:
+                page.wait_for_timeout(2000)
+                return
+        raise RuntimeError("Gave up waiting for the login in the browser window.")
 
     def _fill_login_form(self) -> None:
         page = self._page
         user = page.locator('input[name="username"], input[type="email"], #username').first
         pwd = page.locator('input[name="password"], input[type="password"], #password').first
-        user.wait_for(timeout=20000)
+        user.wait_for(timeout=30000)
         user.fill(self.email)
         pwd.fill(self.password)
         page.locator('#kc-login, button[type="submit"], input[type="submit"]').first.click()
-
-    def _wait_until_logged_in(self, timeout_s: float = 300) -> None:
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            self._page.wait_for_timeout(1000)
-            if self._logged_in():
-                return
-        raise RuntimeError("Timed out waiting for the Multipass login to complete.")
-
-    # ---- subscription id --------------------------------------------------
-
-    def _discover_subscription_id(self) -> str:
-        found = _scrape_subscription_id(self._page)
-        if found:
-            return found
-        raise RuntimeError(
-            "Could not find your subscription id. Run `wizz-finder login`, do one search in the "
-            "browser window, and it will be written to .env as WIZZ_SUBSCRIPTION_ID."
-        )
 
     # ---- the check ----------------------------------------------------------
 
@@ -175,15 +209,44 @@ class PortalAvailability:
         return parse_availability(payload, check.origin, check.dest, self.fee, self.currency)
 
     def _search(self, origin: str, dest: str, day: date) -> dict | None:
-        page = self._open()
-        if not UUID_RE.match(self.subscription_id or ""):
-            raise RuntimeError(f"Subscription id does not look right: {self.subscription_id!r}")
+        """Ask the portal. The answer itself tells us whether we are logged in."""
+        self._open()
+        self._ensure_subscription_id()
+
+        if self.verbose:
+            print(f"  [{self.requests_made + 1}] checking {origin} -> {dest} on {day}", flush=True)
+        result = self._post(origin, dest, day)
+        if looks_like_auth_failure(result["status"], result["text"]):
+            self._log_in()
+            result = self._post(origin, dest, day)
+            if looks_like_auth_failure(result["status"], result["text"]):
+                raise RuntimeError(
+                    "The portal still rejects the search after logging in. If you have more than "
+                    "one subscription, the id in .env may belong to a different one: check it with "
+                    "`wizz-finder subscription-id`."
+                )
+
+        if result["status"] != 200:
+            print(f"  portal answered HTTP {result['status']} for {origin} -> {dest} on {day}")
+            return None
+        try:
+            payload = json.loads(result["text"])
+        except json.JSONDecodeError:
+            print(f"  portal sent something that is not JSON for {origin} -> {dest} on {day}")
+            return None
+        if "flightsOutbound" not in payload:
+            print(f"  unexpected portal answer for {origin} -> {dest} on {day}: {sorted(payload)[:6]}")
+            return None
+        return payload
+
+    def _post(self, origin: str, dest: str, day: date) -> dict:
+        page = self._page
         body = {"flightType": "OW", "origin": origin, "destination": dest,
                 "departure": day.isoformat(), "arrival": "", "intervalSubtype": None}
         if self.requests_made:
             page.wait_for_timeout(int(self.delay * 1000))
         self.requests_made += 1
-        result = page.evaluate(
+        return page.evaluate(
             """async ([url, body]) => {
                 const meta = document.querySelector('meta[name="csrf-token"]');
                 const csrf = (meta && meta.content) || (window.Laravel && window.Laravel.csrfToken) || '';
@@ -199,18 +262,6 @@ class PortalAvailability:
             }""",
             [f"{PORTAL_URL}/json/availability/{self.subscription_id}", body],
         )
-        if result["status"] != 200:
-            print(f"  portal answered HTTP {result['status']} for {origin}->{dest} {day}")
-            if result["status"] in (401, 403, 419):
-                self._page = None  # force re-login next time
-            return None
-        try:
-            payload = json.loads(result["text"])
-        except json.JSONDecodeError:
-            return None
-        if "flightsOutbound" not in payload:
-            return None
-        return payload
 
     # ---- cache --------------------------------------------------------------
 

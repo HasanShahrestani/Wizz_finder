@@ -131,6 +131,24 @@ the Network tab, search any route, and find the request under
   treat both as private.
 - `--availability file.json` and `--portal` can be combined; the file is consulted first.
 - `--headed` shows the browser, which helps when the login flow changes.
+- A search can need dozens of checks at roughly two seconds each, so expect it to take a
+  few minutes the first time. Each check prints a line as it goes, and answers are cached
+  for 30 minutes, so a re-run is fast.
+
+### If the portal rejects the search
+
+The tool never guesses whether you are logged in: it makes the search and reads the
+answer. If the portal rejects it, the tool logs in and retries once. When that still
+fails it says so rather than hanging. Things to try, in order:
+
+```bash
+wizz-finder login                                        # refresh the saved session
+wizz-finder search ... --portal --headed                 # watch it, and log in by hand
+wizz-finder subscription-id                              # confirm the id that is set
+```
+
+If you have more than one subscription, an id belonging to a different one produces a
+rejection that no amount of logging in will fix.
 
 ## Limits of this version
 
