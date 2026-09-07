@@ -58,6 +58,7 @@ class RyanairFares:
         self.cache_dir = cache_dir
         self.ttl = ttl_hours * 3600
         self.requests_made = 0
+        self.errors: list[str] = []
 
     def search(self, origin: str, dest: str, day_from: date, day_to: date) -> list[Flight]:
         flights: list[Flight] = []
@@ -78,7 +79,8 @@ class RyanairFares:
         self.requests_made += 1
         try:
             resp = requests.get(url, params=params, headers={"User-Agent": UA}, timeout=30)
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            self.errors.append(f"could not reach Ryanair: {exc}")
             return None
         if resp.status_code != 200:
             # Ryanair answers 404 for routes it does not fly.
@@ -163,6 +165,7 @@ class KiwiFares:
         self.api_key, self.currency, self.limit = api_key, currency, limit
         self.cache_dir, self.ttl = cache_dir, ttl_hours * 3600
         self.requests_made = 0
+        self.errors: list[str] = []
 
     def search(self, origin: str, dest: str, day_from: date, day_to: date) -> list[Flight]:
         flights: list[Flight] = []
@@ -186,11 +189,14 @@ class KiwiFares:
         self.requests_made += 1
         try:
             resp = requests.get(self.URL, params=params, headers={"apikey": self.api_key}, timeout=30)
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            self.errors.append(f"could not reach Kiwi: {exc}")
             return None
-        if resp.status_code == 401:
-            raise RuntimeError("Kiwi rejected KIWI_API_KEY (401). Check the key in .env.")
+        if resp.status_code in (401, 403):
+            raise RuntimeError(f"Kiwi rejected KIWI_API_KEY (HTTP {resp.status_code}). "
+                               "Check the key in .env.")
         if resp.status_code != 200:
+            self.errors.append(f"Kiwi answered HTTP {resp.status_code} for {origin}-{dest} {day}")
             return {}
         return resp.json()
 
@@ -233,6 +239,7 @@ class AmadeusFares:
         self.host = self.HOSTS.get(environment, self.HOSTS["test"])
         self.cache_dir, self.ttl = cache_dir, ttl_hours * 3600
         self.requests_made = 0
+        self.errors: list[str] = []
         self._token: str | None = None
         self._token_expires = 0.0
 
@@ -251,12 +258,15 @@ class AmadeusFares:
     def _access_token(self) -> str:
         if self._token and time.time() < self._token_expires:
             return self._token
-        resp = requests.post(
-            f"{self.host}/v1/security/oauth2/token",
-            data={"grant_type": "client_credentials",
-                  "client_id": self.client_id, "client_secret": self.client_secret},
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                f"{self.host}/v1/security/oauth2/token",
+                data={"grant_type": "client_credentials",
+                      "client_id": self.client_id, "client_secret": self.client_secret},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"Could not reach Amadeus at {self.host}: {exc}") from exc
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Amadeus refused the credentials (HTTP {resp.status_code}). "
@@ -268,6 +278,7 @@ class AmadeusFares:
         return self._token
 
     def _fetch(self, origin: str, dest: str, day: date) -> dict | None:
+        token = self._access_token()  # outside the try: a bad key must not look like no flights
         params = {
             "originLocationCode": origin, "destinationLocationCode": dest,
             "departureDate": day.isoformat(), "adults": 1,
@@ -278,12 +289,17 @@ class AmadeusFares:
             resp = requests.get(
                 f"{self.host}/v2/shopping/flight-offers",
                 params=params,
-                headers={"Authorization": f"Bearer {self._access_token()}"},
+                headers={"Authorization": f"Bearer {token}"},
                 timeout=30,
             )
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            self.errors.append(f"could not reach Amadeus: {exc}")
             return None
+        if resp.status_code in (401, 403):
+            raise RuntimeError(f"Amadeus refused the request (HTTP {resp.status_code}). "
+                               "Check the credentials, and whether the app has flight-offers access.")
         if resp.status_code != 200:
+            self.errors.append(f"Amadeus answered HTTP {resp.status_code} for {origin}-{dest} {day}")
             return {}
         return resp.json()
 

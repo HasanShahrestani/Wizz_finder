@@ -53,6 +53,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--refresh", action="store_true", help="re-download the route network")
 
+    p_fc = sub.add_parser("fare-check", help="check which fare sources are configured and working")
+    p_fc.add_argument("--from", dest="origin", default="LTN", help="test route origin")
+    p_fc.add_argument("--to", dest="dest", default="MXP", help="test route destination")
+    p_fc.add_argument("--date", type=date.fromisoformat, help="test date (default: a week from today)")
+    p_fc.add_argument("--fare-source", default="auto")
+    p_fc.add_argument("--currency", default="GBP")
+    p_fc.add_argument("--no-ryanair", action="store_true", help=argparse.SUPPRESS)
+
     sub.add_parser("login", help="log in to the Multipass portal once and save your subscription id")
 
     p_id = sub.add_parser("subscription-id", help="show, set, or recover your Multipass subscription id")
@@ -78,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_subscription_id(args)
     if args.cmd == "probe":
         return cmd_probe(args)
+    if args.cmd == "fare-check":
+        return cmd_fare_check(args)
     if args.cmd == "routes":
         return cmd_routes(args)
     if args.cmd == "search":
@@ -87,6 +97,71 @@ def main(argv: list[str] | None = None) -> int:
 
         return record()
     return 2
+
+
+FARE_SOURCE_HELP = {
+    "kiwi": ("KIWI_API_KEY", "https://tequila.kiwi.com — sign up, create a solution, copy its API key"),
+    "amadeus": ("AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET",
+                "https://developers.amadeus.com — register, create a Self-Service app, "
+                "copy its API Key and API Secret"),
+}
+
+
+def cmd_fare_check(args) -> int:
+    """Try one lookup per configured fare source and say which ones work."""
+    from datetime import timedelta
+
+    day = args.date or (date.today() + timedelta(days=7))
+    origin, dest = args.origin.upper(), args.dest.upper()
+    names = _fare_sources(args)
+    if not names:
+        print("No fare sources selected.")
+        return 1
+
+    try:
+        providers, notes = build_providers(names, args.currency)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    print(f"Test lookup: {origin} -> {dest} on {day}\n")
+    configured = {p.name for p in providers}
+    failures = 0
+
+    for name in names:
+        if name not in configured:
+            key, where = FARE_SOURCE_HELP.get(name, ("its key", ""))
+            print(f"  {name:<8} not configured — set {key} in .env")
+            if where:
+                print(f"           {where}")
+            failures += 1
+            continue
+        provider = next(p for p in providers if p.name == name)
+        try:
+            flights = provider.search(origin, dest, day, day)
+        except RuntimeError as exc:
+            print(f"  {name:<8} FAILED — {exc}")
+            failures += 1
+            continue
+        except Exception as exc:  # network trouble, unexpected payload shape
+            print(f"  {name:<8} FAILED — {type(exc).__name__}: {exc}")
+            failures += 1
+            continue
+        errors = getattr(provider, "errors", [])
+        if flights:
+            cheapest = min(flights, key=lambda f: f.price)
+            print(f"  {name:<8} OK — {len(flights)} flight(s), cheapest "
+                  f"{cheapest.price:.2f} {cheapest.currency} on {cheapest.carrier}")
+        elif errors:
+            print(f"  {name:<8} FAILED — {errors[0]}")
+            failures += 1
+        else:
+            print(f"  {name:<8} answered, but found no flights on this route and day.")
+            print(f"           Try another route or date before assuming the key is wrong.")
+
+    for note in notes:
+        print(f"\nNote: {note}")
+    return 1 if failures else 0
 
 
 def cmd_probe(args) -> int:
@@ -284,6 +359,8 @@ def _print(result: PlanResult, origins, dests, day, availability_given: bool) ->
     print(f"Search {','.join(origins)} -> {','.join(dests)} on {day:%a %d %b %Y}")
     print(f"  fare lookups: {result.fare_lookups}, AYCF checks known: {result.checks_done}, "
           f"unknown: {len(result.unknown_checks)}")
+    for provider_name, message in getattr(result, "fare_errors", []):
+        print(f"  {provider_name} had trouble: {message}")
     if result.fare_lookups_skipped:
         print(f"  {result.fare_lookups_skipped} fare lookups skipped by the lookup budget; "
               f"raise it with --max-fare-lookups")

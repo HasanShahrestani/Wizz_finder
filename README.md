@@ -114,6 +114,31 @@ wizz-finder search ... --fare-source none           # AYCF legs only
 The run prints which sources are active and says when a key is missing. Only nonstop
 fares are used, because the tool builds the connections itself.
 
+### Getting the keys
+
+**Amadeus** (easiest to obtain). Register at
+[developers.amadeus.com](https://developers.amadeus.com), open **My Self-Service
+Workspace**, create an app, and copy its **API Key** and **API Secret** into
+`AMADEUS_CLIENT_ID` and `AMADEUS_CLIENT_SECRET`. New apps start on the **test** host,
+whose flight data is a limited sample rather than the live market, so treat its prices as
+a wiring check, not as fares. Moving the app to production in the same workspace gives
+real data on a free monthly quota; set `AMADEUS_ENV=production` once you have.
+
+**Kiwi** (better coverage of low-cost airlines). Sign up at
+[tequila.kiwi.com](https://tequila.kiwi.com), create a solution, and copy its API key into
+`KIWI_API_KEY`. Kiwi vets applicants, so access is not guaranteed and approval can take
+a while.
+
+Then check both work:
+
+```bash
+wizz-finder fare-check
+```
+
+It runs one real lookup per configured source and reports what came back. A missing key,
+a rejected key, and an unreachable service each say so distinctly — an empty result is
+only ever reported as "no flights" when the source genuinely answered with none.
+
 ## Budgets
 
 An AYCF check takes a couple of seconds and a fare lookup may cost an API call, so both

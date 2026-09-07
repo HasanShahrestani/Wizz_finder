@@ -129,6 +129,7 @@ class Planner:
             checks_done=len(needed) - len(unknown),
             fare_lookups=self.fare_lookups,
             fare_lookups_skipped=self.fare_lookups_skipped,
+            fare_errors=[(p.name, p.errors[0]) for p in self.fares if getattr(p, "errors", [])],
             skipped_groups=skipped,
         )
 

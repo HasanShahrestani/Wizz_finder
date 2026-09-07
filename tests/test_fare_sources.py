@@ -90,3 +90,69 @@ def test_build_providers_uses_keys_when_present(monkeypatch):
 def test_build_providers_rejects_an_unknown_name():
     with pytest.raises(ValueError, match="Unknown fare source"):
         build_providers(["easyjet"], "GBP")
+
+
+# ---- failures must never look like an empty market -----------------------------
+
+import requests
+
+from wizz_finder.fares import AmadeusFares, KiwiFares
+
+
+class FakeResponse:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def test_amadeus_bad_credentials_raise_rather_than_return_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse(401))
+    provider = AmadeusFares("id", "secret", cache_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="refused the credentials"):
+        provider.search("LTN", "MXP", date(2026, 9, 8), date(2026, 9, 8))
+
+
+def test_amadeus_unreachable_raises(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise requests.ConnectionError("no route to host")
+
+    monkeypatch.setattr(requests, "post", boom)
+    provider = AmadeusFares("id", "secret", cache_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="Could not reach Amadeus"):
+        provider.search("LTN", "MXP", date(2026, 9, 8), date(2026, 9, 8))
+
+
+def test_amadeus_records_a_network_error_on_the_search(monkeypatch, tmp_path):
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse(200, {"access_token": "t", "expires_in": 1800}))
+
+    def boom(*a, **k):
+        raise requests.ConnectionError("dropped")
+
+    monkeypatch.setattr(requests, "get", boom)
+    provider = AmadeusFares("id", "secret", cache_dir=tmp_path)
+    assert provider.search("LTN", "MXP", date(2026, 9, 8), date(2026, 9, 8)) == []
+    assert provider.errors and "dropped" in provider.errors[0]
+
+
+def test_kiwi_rejects_a_bad_key_loudly(monkeypatch, tmp_path):
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(401))
+    provider = KiwiFares("bad-key", cache_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="KIWI_API_KEY"):
+        provider.search("LTN", "MXP", date(2026, 9, 8), date(2026, 9, 8))
+
+
+def test_kiwi_records_a_server_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(503))
+    provider = KiwiFares("key", cache_dir=tmp_path)
+    assert provider.search("LTN", "MXP", date(2026, 9, 8), date(2026, 9, 8)) == []
+    assert provider.errors and "503" in provider.errors[0]
+
+
+def test_a_genuine_empty_answer_records_no_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResponse(200, {"data": [], "currency": "GBP"}))
+    provider = KiwiFares("key", cache_dir=tmp_path)
+    assert provider.search("LTN", "MXP", date(2026, 9, 8), date(2026, 9, 8)) == []
+    assert provider.errors == []

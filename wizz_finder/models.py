@@ -96,4 +96,5 @@ class PlanResult:
     checks_done: int = 0
     fare_lookups: int = 0
     fare_lookups_skipped: int = 0
+    fare_errors: list[tuple[str, str]] = field(default_factory=list)
     skipped_groups: int = 0
