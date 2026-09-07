@@ -51,6 +51,14 @@ def main(argv: list[str] | None = None) -> int:
     p_id = sub.add_parser("subscription-id", help="show, set, or recover your Multipass subscription id")
     p_id.add_argument("--set", dest="value", help="write this id to .env")
     p_id.add_argument("--from-recording", type=Path, help="read it out of a record-portal .jsonl file")
+    p_probe = sub.add_parser("probe", help="run one portal check and print the full request and answer")
+    p_probe.add_argument("--from", dest="origin", required=True)
+    p_probe.add_argument("--to", dest="dest", required=True)
+    p_probe.add_argument("--date", required=True, type=date.fromisoformat)
+    p_probe.add_argument("--headed", action="store_true", help="show the browser")
+    p_probe.add_argument("--aycf-fee", type=float, default=9.99)
+    p_probe.add_argument("--currency", default="GBP")
+
     sub.add_parser("record-portal", help="open the Multipass portal in a browser and record its API traffic")
 
     load_env()
@@ -61,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         return interactive_login()
     if args.cmd == "subscription-id":
         return cmd_subscription_id(args)
+    if args.cmd == "probe":
+        return cmd_probe(args)
     if args.cmd == "routes":
         return cmd_routes(args)
     if args.cmd == "search":
@@ -70,6 +80,32 @@ def main(argv: list[str] | None = None) -> int:
 
         return record()
     return 2
+
+
+def cmd_probe(args) -> int:
+    """One check with full diagnostics, for when the portal rejects everything."""
+    from .portal import PortalAvailability
+
+    with PortalAvailability(
+        fee=args.aycf_fee,
+        currency=args.currency,
+        subscription_id=os.environ.get("WIZZ_SUBSCRIPTION_ID") or None,
+        email=os.environ.get("WIZZ_EMAIL") or None,
+        password=os.environ.get("WIZZ_PASSWORD") or None,
+        headless=not args.headed,
+        delay_seconds=0,
+        verbose=False,
+    ) as portal:
+        report = portal.probe(args.origin.upper(), args.dest.upper(), args.date)
+
+    print(json.dumps(report, indent=2, default=str))
+    print()
+    if report["status"] == 200 and "flightsOutbound" in report["response_body"]:
+        print("The portal answered normally, so `search --portal` should work.")
+    else:
+        print("The portal did not answer normally. The response_body above says why;")
+        print("no credentials or full ids are in this output, so it is safe to share.")
+    return 0
 
 
 def cmd_subscription_id(args) -> int:

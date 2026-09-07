@@ -150,6 +150,18 @@ wizz-finder subscription-id                              # confirm the id that i
 If you have more than one subscription, an id belonging to a different one produces a
 rejection that no amount of logging in will fix.
 
+When the portal answers but rejects the request itself (an HTTP 400, say), the tool
+prints what the portal said, and stops after five rejections in a row rather than making
+dozens more. To see one exchange in full:
+
+```bash
+wizz-finder probe --from LTN --to BUD --date 2026-09-08 --headed
+```
+
+That prints the request, the response status, headers and body, and whether the page
+carried a login and a CSRF token. The subscription id is masked and no credentials
+appear, so the output is safe to paste into a bug report.
+
 ## Limits of this version
 
 - Two legs at most, same-airport connections only.

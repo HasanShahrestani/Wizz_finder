@@ -76,6 +76,8 @@ SUB_ID = "9da7635e-870f-45ff-8105-3c66635b08ea"
 class FakePage:
     """Stands in for the Playwright page: records posts and replays canned answers."""
 
+    url = "https://multipass.wizzair.com/w6/subscriptions"
+
     def __init__(self, answers):
         self.answers = list(answers)
         self.posts = 0
@@ -152,3 +154,41 @@ def test_headless_without_credentials_explains_the_options(monkeypatch):
     monkeypatch.setattr(p._page, "goto", lambda *a, **k: None, raising=False)
     with pytest.raises(RuntimeError, match="wizz-finder login"):
         p.available_flights(AycfCheck("LTN", "AYT", date(2026, 9, 9)))
+
+
+# ---- failure reporting ---------------------------------------------------------
+
+BAD_REQUEST = {"status": 400, "text": json.dumps({"errors": {"departure": ["out of range"]}})}
+
+
+def test_repeated_rejections_abort_with_the_probe_command(monkeypatch, capsys):
+    p = _provider([BAD_REQUEST] * 3, max_failures=3)
+    monkeypatch.setattr(p, "_log_in", lambda: pytest.fail("400 is not a login problem"))
+    for _ in range(2):
+        assert p.available_flights(AycfCheck("LTN", "BUD", date(2026, 9, 8))) is None
+    with pytest.raises(RuntimeError, match="wizz-finder probe"):
+        p.available_flights(AycfCheck("LTN", "BUD", date(2026, 9, 8)))
+    out = capsys.readouterr().out
+    assert "out of range" in out          # the portal's own words, on the first failure
+    assert out.count("out of range") == 1  # and only once
+
+
+def test_a_success_resets_the_failure_count(monkeypatch):
+    p = _provider([BAD_REQUEST, OK, BAD_REQUEST], max_failures=2)
+    monkeypatch.setattr(p, "_log_in", lambda: pytest.fail("400 is not a login problem"))
+    monkeypatch.setattr(p, "_save_cache", lambda: None)
+    assert p.available_flights(AycfCheck("LTN", "BUD", date(2026, 9, 8))) is None
+    assert len(p.available_flights(AycfCheck("LTN", "AYT", date(2026, 9, 9)))) == 1
+    assert p.available_flights(AycfCheck("LTN", "BUD", date(2026, 9, 10))) is None  # no raise
+
+
+def test_probe_masks_the_subscription_id():
+    p = _provider([OK])
+    p._page.evaluate = lambda script, args=None: (
+        {"url": "x", "hasUserInfo": True, "cvoKeys": [], "hasCsrfMeta": True,
+         "hasLaravelToken": True, "cookieNames": ["XSRF-TOKEN"]}
+        if args is None else OK
+    )
+    report = p.probe("LTN", "AYT", date(2026, 9, 9))
+    assert SUB_ID not in json.dumps(report)
+    assert report["subscription_id"].startswith("9da7635e")

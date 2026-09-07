@@ -89,6 +89,7 @@ class PortalAvailability:
         cache_ttl_minutes: float = 30,
         login_timeout: float = 300,
         verbose: bool = True,
+        max_failures: int = 5,
     ):
         self.fee, self.currency = fee, currency
         self.subscription_id = subscription_id
@@ -97,7 +98,9 @@ class PortalAvailability:
         self.profile_dir, self.cache_path, self.ttl = profile_dir, cache_path, cache_ttl_minutes * 60
         self.login_timeout = login_timeout
         self.verbose = verbose
+        self.max_failures = max_failures
         self.requests_made = 0
+        self._failures = 0
         self._cache = self._load_cache()
         self._pw = self._browser = self._page = None
 
@@ -226,18 +229,71 @@ class PortalAvailability:
                     "`wizz-finder subscription-id`."
                 )
 
+        payload = None
+        problem = None
         if result["status"] != 200:
-            print(f"  portal answered HTTP {result['status']} for {origin} -> {dest} on {day}")
-            return None
-        try:
-            payload = json.loads(result["text"])
-        except json.JSONDecodeError:
-            print(f"  portal sent something that is not JSON for {origin} -> {dest} on {day}")
-            return None
-        if "flightsOutbound" not in payload:
-            print(f"  unexpected portal answer for {origin} -> {dest} on {day}: {sorted(payload)[:6]}")
-            return None
-        return payload
+            problem = f"HTTP {result['status']}"
+        else:
+            try:
+                payload = json.loads(result["text"])
+            except json.JSONDecodeError:
+                problem = "the answer was not JSON"
+                payload = None
+            else:
+                if "flightsOutbound" not in payload:
+                    problem = f"no flightsOutbound in the answer (keys: {sorted(payload)[:6]})"
+                    payload = None
+
+        if problem is None:
+            self._failures = 0
+            return payload
+
+        self._failures += 1
+        self._report_failure(origin, dest, day, problem, result)
+        if self._failures >= self.max_failures:
+            raise RuntimeError(
+                f"The portal rejected {self._failures} checks in a row ({problem}).\n"
+                "Stopping rather than making dozens more failing requests.\n"
+                "Run this to see the full request and answer for a single route:\n"
+                f"  wizz-finder probe --from {origin} --to {dest} --date {day} --headed"
+            )
+        return None
+
+    def _report_failure(self, origin: str, dest: str, day: date, problem: str, result: dict) -> None:
+        print(f"  portal rejected {origin} -> {dest} on {day}: {problem}")
+        if self._failures == 1:
+            body = (result.get("text") or "").strip()
+            if body:
+                print(f"    it said: {body[:400]}")
+            print(f"    request was made from {result.get('page_url')}")
+        elif self._failures == 2:
+            print("    (further failure details suppressed)")
+
+    def probe(self, origin: str, dest: str, day: date) -> dict:
+        """One check, with everything needed to work out why the portal is unhappy."""
+        self._open()
+        sub_id = self._ensure_subscription_id()
+        state = self._page.evaluate(
+            """() => ({
+                url: window.location.href,
+                hasUserInfo: !!(window.CVO && window.CVO.hasUserInfo),
+                cvoKeys: Object.keys(window.CVO || {}),
+                hasCsrfMeta: !!document.querySelector('meta[name="csrf-token"]'),
+                hasLaravelToken: !!(window.Laravel && window.Laravel.csrfToken),
+                cookieNames: document.cookie.split(';').map(c => c.split('=')[0].trim()).filter(Boolean),
+            })"""
+        )
+        result = self._post(origin, dest, day)
+        return {
+            "subscription_id": mask(sub_id),
+            "url": f"{PORTAL_URL}/json/availability/{mask(sub_id)}",
+            "request_body": {"flightType": "OW", "origin": origin, "destination": dest,
+                             "departure": day.isoformat(), "arrival": "", "intervalSubtype": None},
+            "page": state,
+            "status": result["status"],
+            "response_headers": result.get("headers", {}),
+            "response_body": result.get("text", ""),
+        }
 
     def _post(self, origin: str, dest: str, day: date) -> dict:
         page = self._page
@@ -246,7 +302,7 @@ class PortalAvailability:
         if self.requests_made:
             page.wait_for_timeout(int(self.delay * 1000))
         self.requests_made += 1
-        return page.evaluate(
+        result = page.evaluate(
             """async ([url, body]) => {
                 const meta = document.querySelector('meta[name="csrf-token"]');
                 const csrf = (meta && meta.content) || (window.Laravel && window.Laravel.csrfToken) || '';
@@ -258,10 +314,12 @@ class PortalAvailability:
                 const r = await fetch(url, {method: 'POST', headers, credentials: 'same-origin',
                                             body: JSON.stringify(body)});
                 const text = await r.text();
-                return {status: r.status, text};
+                return {status: r.status, text, headers: Object.fromEntries(r.headers.entries())};
             }""",
             [f"{PORTAL_URL}/json/availability/{self.subscription_id}", body],
         )
+        result["page_url"] = page.url
+        return result
 
     # ---- cache --------------------------------------------------------------
 
