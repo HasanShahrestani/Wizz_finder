@@ -98,14 +98,21 @@ def cmd_probe(args) -> int:
     ) as portal:
         report = portal.probe(args.origin.upper(), args.dest.upper(), args.date)
 
+    from .portal import WRONG_ID_HELP, looks_like_unknown_subscription
+
     print(json.dumps(report, indent=2, default=str))
     print()
     if report["status"] == 200 and "flightsOutbound" in report["response_body"]:
         print("The portal answered normally, so `search --portal` should work.")
-    else:
-        print("The portal did not answer normally. The response_body above says why;")
-        print("no credentials or full ids are in this output, so it is safe to share.")
-    return 0
+        return 0
+    if looks_like_unknown_subscription(report["status"], report["response_body"]):
+        print(WRONG_ID_HELP)
+        return 1
+    if not report["page"]["url"].rstrip("/").endswith("private-page"):
+        print("The browser was not on the logged-in portal page. Run `wizz-finder login` first.")
+    print("The portal did not answer normally. The response_body above says why;")
+    print("no credentials or full ids are in this output, so it is safe to share.")
+    return 1
 
 
 def cmd_subscription_id(args) -> int:

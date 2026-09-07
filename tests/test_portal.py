@@ -192,3 +192,30 @@ def test_probe_masks_the_subscription_id():
     report = p.probe("LTN", "AYT", date(2026, 9, 9))
     assert SUB_ID not in json.dumps(report)
     assert report["subscription_id"].startswith("9da7635e")
+
+
+# ---- a wrong subscription id ---------------------------------------------------
+
+from wizz_finder.portal import looks_like_unknown_subscription
+
+NOT_FOUND = {"status": 400, "text": json.dumps({"code": "notFound", "message": "notFound"})}
+
+
+def test_not_found_is_recognised_as_a_wrong_id():
+    assert looks_like_unknown_subscription(400, NOT_FOUND["text"])
+    assert looks_like_unknown_subscription(404, json.dumps({"code": "NotFound"}))
+
+
+def test_other_rejections_are_not_a_wrong_id():
+    assert not looks_like_unknown_subscription(400, json.dumps({"errors": {"departure": ["bad"]}}))
+    assert not looks_like_unknown_subscription(200, json.dumps(FIXTURE))
+    assert not looks_like_unknown_subscription(500, "boom")
+    assert not looks_like_unknown_subscription(400, "<html>nope</html>")
+
+
+def test_wrong_id_stops_immediately_with_an_explanation(monkeypatch):
+    p = _provider([NOT_FOUND] * 5)
+    monkeypatch.setattr(p, "_log_in", lambda: pytest.fail("notFound is not a login problem"))
+    with pytest.raises(RuntimeError, match="does not recognise that subscription id"):
+        p.available_flights(AycfCheck("LTN", "BUD", date(2026, 9, 8)))
+    assert p._page.posts == 1  # no retrying, no working through the check list

@@ -49,6 +49,35 @@ def looks_like_auth_failure(status: int, text: str) -> bool:
     return isinstance(payload, dict) and bool(payload.get("redirectUri"))
 
 
+def looks_like_unknown_subscription(status: int, text: str) -> bool:
+    """Does the portal say the id in the URL is not a subscription of yours?
+
+    A wrong id answers 400 with {"code": "notFound"}. This is the usual outcome of
+    copying some other UUID off the portal's pages: the cookie-consent id and the
+    profile id both look exactly like a subscription id.
+    """
+    if status not in (400, 404):
+        return False
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return "notfound" in str(payload.get("code", "")).lower()
+
+
+WRONG_ID_HELP = (
+    "The portal does not recognise that subscription id (it answered notFound).\n"
+    "It is almost certainly a different UUID copied off the portal: the cookie-consent\n"
+    "id and the profile id look just like a subscription id. Get the real one with:\n"
+    "  wizz-finder login                                     log in, then search once\n"
+    "  wizz-finder subscription-id --from-recording f.jsonl  from a record-portal file\n"
+    "The subscription id is the last part of a .../json/availability/<id> request URL,\n"
+    "and nothing else."
+)
+
+
 def parse_availability(payload: dict, origin: str, dest: str, fee: float, currency: str) -> list[Flight]:
     flights: list[Flight] = []
     for entry in payload.get("flightsOutbound") or []:
@@ -228,6 +257,9 @@ class PortalAvailability:
                     "one subscription, the id in .env may belong to a different one: check it with "
                     "`wizz-finder subscription-id`."
                 )
+
+        if looks_like_unknown_subscription(result["status"], result["text"]):
+            raise RuntimeError(WRONG_ID_HELP)
 
         payload = None
         problem = None

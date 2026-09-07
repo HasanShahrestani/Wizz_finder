@@ -124,6 +124,10 @@ To read it off the portal by hand: open the portal, press F12 for developer tool
 the Network tab, search any route, and find the request under
 `.../w6/subscriptions/json/availability/<id>`. The id is that last part of the URL.
 
+**Only that URL carries it.** The portal's pages are full of other UUIDs that look
+identical — the cookie-consent id and your profile id among them — and a wrong one makes
+every check fail with `notFound`. The tool recognises that answer and says so.
+
 ### Notes
 
 - Credentials live only in `.env`, which is git-ignored, and are used only to fill the
