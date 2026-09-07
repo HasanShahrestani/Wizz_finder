@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import airports
 from .availability import CombinedAvailability, FileAvailability, NoAvailability
+from .envfile import load_env, mask, read_env, set_env_value
 from .aycf_routes import load_network
 from .fares import FileFares, RyanairFares
 from .models import Itinerary, PlanResult
@@ -45,7 +46,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--refresh", action="store_true", help="re-download the route network")
 
-    sub.add_parser("login", help="log in to the Multipass portal once in a visible browser")
+    sub.add_parser("login", help="log in to the Multipass portal once and save your subscription id")
+
+    p_id = sub.add_parser("subscription-id", help="show, set, or recover your Multipass subscription id")
+    p_id.add_argument("--set", dest="value", help="write this id to .env")
+    p_id.add_argument("--from-recording", type=Path, help="read it out of a record-portal .jsonl file")
     sub.add_parser("record-portal", help="open the Multipass portal in a browser and record its API traffic")
 
     load_env()
@@ -54,6 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         from .portal import interactive_login
 
         return interactive_login()
+    if args.cmd == "subscription-id":
+        return cmd_subscription_id(args)
     if args.cmd == "routes":
         return cmd_routes(args)
     if args.cmd == "search":
@@ -63,6 +70,39 @@ def main(argv: list[str] | None = None) -> int:
 
         return record()
     return 2
+
+
+def cmd_subscription_id(args) -> int:
+    from .portal import UUID_RE, subscription_id_from_recording
+
+    value = args.value
+    if args.from_recording:
+        value = subscription_id_from_recording(args.from_recording)
+        if not value:
+            print(f"No subscription id found in {args.from_recording}.", file=sys.stderr)
+            print("A recording only contains it if you ran a search while recording.", file=sys.stderr)
+            return 1
+    if value:
+        if not UUID_RE.match(value):
+            print(f"That does not look like a subscription id: {value!r}", file=sys.stderr)
+            print("It should look like 1a2b3c4d-1234-5678-9abc-1a2b3c4d5e6f.", file=sys.stderr)
+            return 2
+        set_env_value("WIZZ_SUBSCRIPTION_ID", value)
+        print(f"Wrote WIZZ_SUBSCRIPTION_ID={mask(value)} to .env")
+        return 0
+
+    current = read_env().get("WIZZ_SUBSCRIPTION_ID") or os.environ.get("WIZZ_SUBSCRIPTION_ID")
+    if current:
+        print(f"WIZZ_SUBSCRIPTION_ID is set ({mask(current)}).")
+        return 0
+    print("No subscription id yet. Three ways to get one:")
+    print("  wizz-finder login                                  log in and search once; it is saved for you")
+    print("  wizz-finder subscription-id --from-recording f.jsonl   read it from a record-portal recording")
+    print("  wizz-finder subscription-id --set <id>             paste it yourself")
+    print()
+    print("To find it by hand: open the portal, press F12, open the Network tab, search any")
+    print("route, and look for a request under .../json/availability/<id>. The id is that last part.")
+    return 1
 
 
 def cmd_routes(args) -> int:
@@ -127,18 +167,6 @@ def _run_search(args, net, origins, dests, fares, availability) -> int:
     else:
         _print(result, origins, dests, args.date, availability_given=args.availability is not None or args.portal)
     return 0
-
-
-def load_env(path: Path = Path(".env")) -> None:
-    """Load KEY=VALUE lines from .env into the environment (existing variables win)."""
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
 def _expand(codes: list[str], radius_km: float, net) -> list[str]:

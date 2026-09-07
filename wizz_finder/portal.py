@@ -18,6 +18,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import airports
+from .envfile import mask, set_env_value
 from .models import AYCF_CARRIER, AycfCheck, Flight
 
 PORTAL_URL = "https://multipass.wizzair.com/w6/subscriptions"
@@ -151,22 +152,12 @@ class PortalAvailability:
     # ---- subscription id --------------------------------------------------
 
     def _discover_subscription_id(self) -> str:
-        page = self._page
-        m = SUB_ID_RE.search(page.content())
-        if m:
-            return m.group(1)
-        found = page.evaluate(
-            """() => {
-                const c = window.CVO || {};
-                const cands = [c.currentPlan, c.subscriptionId, c.subscription, c.userInfo];
-                return JSON.stringify(cands);
-            }"""
-        )
-        for token in re.findall(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", found or ""):
-            return token
+        found = _scrape_subscription_id(self._page)
+        if found:
+            return found
         raise RuntimeError(
-            "Could not find your subscription id on the portal page. Copy it from the portal's "
-            "availability URL (…/json/availability/<id>) into WIZZ_SUBSCRIPTION_ID in .env."
+            "Could not find your subscription id. Run `wizz-finder login`, do one search in the "
+            "browser window, and it will be written to .env as WIZZ_SUBSCRIPTION_ID."
         )
 
     # ---- the check ----------------------------------------------------------
@@ -234,28 +225,92 @@ class PortalAvailability:
         self.cache_path.write_text(json.dumps(self._cache))
 
 
-def interactive_login(profile_dir: Path = PROFILE_DIR) -> int:
-    """Open a visible browser on the portal so you can log in once; the profile keeps the session."""
-    from playwright.sync_api import sync_playwright
+def subscription_id_from_recording(path: Path) -> str | None:
+    """Pull the subscription id out of a `wizz-finder record-portal` recording."""
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    m = SUB_ID_RE.search(text)
+    return m.group(1) if m else None
+
+
+def interactive_login(profile_dir: Path = PROFILE_DIR, env_path: Path = Path(".env")) -> int:
+    """Log in once in a visible browser and capture the subscription id.
+
+    The id only appears when the portal actually searches, so this asks you to run one
+    search in the window. The browser profile keeps you logged in for later runs, and the
+    id is written to .env.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("Playwright is not installed. Run: pip install playwright && playwright install chromium")
+        return 1
 
     profile_dir.mkdir(parents=True, exist_ok=True)
+    found: dict[str, str] = {}
+
+    print("A browser window is opening on the Wizz Multipass portal.")
+    print("  1. Log in.")
+    print("  2. Search any route on any date (the search itself is what reveals your")
+    print("     subscription id; you do not have to book anything).")
+    print("  3. Close the browser window when the results appear.")
+    print()
+
     with sync_playwright() as pw:
         browser = pw.chromium.launch_persistent_context(str(profile_dir), headless=False)
         page = browser.pages[0] if browser.pages else browser.new_page()
-        page.goto(PORTAL_URL + "/auth/login", wait_until="domcontentloaded")
-        print("Log in in the browser window. This tool waits until the portal shows you as logged in.")
-        deadline = time.time() + 600
-        while time.time() < deadline:
-            page.wait_for_timeout(1000)
-            if "openid-connect" in page.url or "login-actions" in page.url:
-                continue
+
+        def on_request(request):
+            if "id" in found:
+                return
+            m = SUB_ID_RE.search(request.url)
+            if m:
+                found["id"] = m.group(1)
+                print(f"Captured subscription id {mask(m.group(1))}")
+
+        browser.on("request", on_request)
+        page.goto(PORTAL_URL, wait_until="domcontentloaded")
+
+        while browser.pages:
             try:
-                if page.evaluate("() => (window.CVO && window.CVO.hasUserInfo) || false"):
-                    print("Logged in. Session saved in", profile_dir)
-                    browser.close()
-                    return 0
+                page.wait_for_timeout(1000)
             except Exception:
-                pass
-        print("Gave up waiting for login.")
-        browser.close()
-        return 1
+                break
+            if "id" not in found:
+                sub_id = _scrape_subscription_id(page)
+                if sub_id:
+                    found["id"] = sub_id
+                    print(f"Found subscription id {mask(sub_id)} on the page")
+        try:
+            browser.close()
+        except Exception:
+            pass
+
+    print(f"\nBrowser session saved in {profile_dir} (you stay logged in for later runs).")
+    if "id" in found:
+        set_env_value("WIZZ_SUBSCRIPTION_ID", found["id"], env_path)
+        print(f"Wrote WIZZ_SUBSCRIPTION_ID to {env_path}.")
+        print("You can now run: wizz-finder search --from LTN --to TIA --date YYYY-MM-DD --portal")
+        return 0
+
+    print("\nNo subscription id seen. That happens if no search was run in the window.")
+    print("Run `wizz-finder login` again and do one search, or find the id by hand:")
+    print("  open the portal, press F12 for developer tools, go to the Network tab, search a")
+    print("  route, and click the request named like a long id under .../json/availability/.")
+    print("  The id is the last part of that URL. Put it in .env as WIZZ_SUBSCRIPTION_ID=<id>.")
+    return 1
+
+
+def _scrape_subscription_id(page) -> str | None:
+    """Best-effort look for the id in the page HTML and the portal's JS state."""
+    try:
+        m = SUB_ID_RE.search(page.content())
+        if m:
+            return m.group(1)
+        blob = page.evaluate("() => JSON.stringify(window.CVO || {})")
+    except Exception:
+        return None
+    m = SUB_ID_RE.search(blob or "")
+    return m.group(1) if m else None

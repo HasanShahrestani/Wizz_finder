@@ -95,18 +95,40 @@ The All You Can Fly fare is only visible to a logged-in subscriber, so the tool 
 real Chromium through Playwright and asks the portal's own search endpoint, one route-day
 at a time, with a pause between requests. Answers are cached for 30 minutes.
 
+### One-time setup
+
 ```bash
 pip install playwright && playwright install chromium
-cp .env.example .env            # optional: WIZZ_EMAIL / WIZZ_PASSWORD for automatic login
-wizz-finder login               # or: log in once by hand; the browser profile keeps the session
+wizz-finder login
+```
+
+`login` opens a browser window. Log in, then **run one search for any route on any date**.
+That search is what reveals your subscription id: the portal only sends the id when it
+actually searches, so logging in alone is not enough. Close the window and the id is
+written to `.env` for you. Then:
+
+```bash
 wizz-finder search --from LTN --to TIA --date 2026-09-08 --portal
 ```
+
+### Finding the subscription id another way
+
+`wizz-finder subscription-id` shows whether one is set and lists the options:
+
+```bash
+wizz-finder subscription-id --from-recording portal_recordings/<file>.jsonl
+wizz-finder subscription-id --set 1a2b3c4d-1234-5678-9abc-1a2b3c4d5e6f
+```
+
+To read it off the portal by hand: open the portal, press F12 for developer tools, go to
+the Network tab, search any route, and find the request under
+`.../w6/subscriptions/json/availability/<id>`. The id is that last part of the URL.
+
+### Notes
 
 - Credentials live only in `.env`, which is git-ignored, and are used only to fill the
   portal's login form. The saved browser profile in `.cache/` also holds your session:
   treat both as private.
-- The subscription id in the search URL is picked up from the portal after login. If that
-  fails, set `WIZZ_SUBSCRIPTION_ID` in `.env` (`wizz-finder record-portal` prints it).
 - `--availability file.json` and `--portal` can be combined; the file is consulted first.
 - `--headed` shows the browser, which helps when the login flow changes.
 
