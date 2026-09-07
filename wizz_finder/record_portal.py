@@ -44,6 +44,9 @@ def record() -> int:
                                   "post": _safe_post(resp.request), "body": body}) + "\n")
             log.flush()
             print(f"  {resp.status} {resp.request.method} {re.sub(r'\?.*', '?...', resp.url)}")
+            m = re.search(r"json/availability/([0-9a-f-]{36})", resp.url)
+            if m:
+                print(f"  -> your subscription id is {m.group(1)} (WIZZ_SUBSCRIPTION_ID in .env)")
 
         browser.on("response", on_response)
         page.goto(PORTAL_URL)

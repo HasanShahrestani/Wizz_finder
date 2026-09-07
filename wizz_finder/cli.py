@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from contextlib import ExitStack
 from datetime import date
 from pathlib import Path
 
 from . import airports
-from .availability import FileAvailability, NoAvailability
+from .availability import CombinedAvailability, FileAvailability, NoAvailability
 from .aycf_routes import load_network
 from .fares import FileFares, RyanairFares
 from .models import Itinerary, PlanResult
@@ -29,6 +31,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--near-from", type=float, default=0, help="also use AYCF airports within N km of origin")
     p.add_argument("--near-to", type=float, default=0, help="also use AYCF airports within N km of destination")
     p.add_argument("--availability", type=Path, help="JSON file with AYCF availability you checked")
+    p.add_argument("--portal", action="store_true", help="check AYCF availability live on the Multipass portal")
+    p.add_argument("--headed", action="store_true", help="show the browser used for --portal")
+    p.add_argument("--portal-delay", type=float, default=2.0, help="seconds between portal requests")
     p.add_argument("--fares", type=Path, help="JSON file with fares you looked up by hand")
     p.add_argument("--no-ryanair", action="store_true", help="skip the Ryanair fare lookup")
     p.add_argument("--currency", default="GBP")
@@ -40,9 +45,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--refresh", action="store_true", help="re-download the route network")
 
+    sub.add_parser("login", help="log in to the Multipass portal once in a visible browser")
     sub.add_parser("record-portal", help="open the Multipass portal in a browser and record its API traffic")
 
+    load_env()
     args = parser.parse_args(argv)
+    if args.cmd == "login":
+        from .portal import interactive_login
+
+        return interactive_login()
     if args.cmd == "routes":
         return cmd_routes(args)
     if args.cmd == "search":
@@ -81,9 +92,27 @@ def cmd_search(args) -> int:
         fares.append(RyanairFares(currency=args.currency))
     if args.fares:
         fares.append(FileFares(args.fares, args.currency))
-    availability = (
-        FileAvailability(args.availability, args.aycf_fee, args.currency) if args.availability else NoAvailability()
-    )
+    providers = []
+    if args.availability:
+        providers.append(FileAvailability(args.availability, args.aycf_fee, args.currency))
+    with ExitStack() as stack:
+        if args.portal:
+            from .portal import PortalAvailability
+
+            providers.append(stack.enter_context(PortalAvailability(
+                fee=args.aycf_fee,
+                currency=args.currency,
+                subscription_id=os.environ.get("WIZZ_SUBSCRIPTION_ID") or None,
+                email=os.environ.get("WIZZ_EMAIL") or None,
+                password=os.environ.get("WIZZ_PASSWORD") or None,
+                headless=not args.headed,
+                delay_seconds=args.portal_delay,
+            )))
+        availability = CombinedAvailability(providers) if providers else NoAvailability()
+        return _run_search(args, net, origins, dests, fares, availability)
+
+
+def _run_search(args, net, origins, dests, fares, availability) -> int:
     options = SearchOptions(
         min_connect_hours=args.min_connect,
         max_layover_hours=args.max_layover,
@@ -96,8 +125,20 @@ def cmd_search(args) -> int:
     if args.json:
         print(json.dumps(_to_json(result), indent=2, default=str))
     else:
-        _print(result, origins, dests, args.date, availability_given=args.availability is not None)
+        _print(result, origins, dests, args.date, availability_given=args.availability is not None or args.portal)
     return 0
+
+
+def load_env(path: Path = Path(".env")) -> None:
+    """Load KEY=VALUE lines from .env into the environment (existing variables win)."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
 def _expand(codes: list[str], radius_km: float, net) -> list[str]:

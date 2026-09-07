@@ -70,3 +70,17 @@ class FileAvailability:
 
 def _hm(text: str):
     return datetime.strptime(text.strip(), "%H:%M").time()
+
+
+class CombinedAvailability:
+    """Ask providers in order; the first one that knows the answer wins."""
+
+    def __init__(self, providers: list[AvailabilityProvider]):
+        self.providers = providers
+
+    def available_flights(self, check: AycfCheck) -> list[Flight] | None:
+        for p in self.providers:
+            found = p.available_flights(check)
+            if found is not None:
+                return found
+        return None

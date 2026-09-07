@@ -1,0 +1,39 @@
+{
+  "flightsOutbound": [
+    {
+      "key": "W95331 LTN#20260909T1500~AYT#20260909T2135",
+      "fareSellKey": "REDACTED",
+      "departure": "3:00 pm",
+      "arrival": "9:35 pm",
+      "departureStation": "LTN",
+      "departureStationText": "London Luton",
+      "arrivalStation": "AYT",
+      "arrivalStationText": "Antalya",
+      "departureDate": "9 September 2026",
+      "arrivalDate": "9 September 2026",
+      "departureStationCode": "LTN",
+      "arrivalStationCode": "AYT",
+      "departureDateIso": "2026-09-09",
+      "departureDateTimeIso": "2026-09-09 16:00:00",
+      "arrivalDateIso": null,
+      "arrivalDateTimeIso": "2026-09-10 00:35:00",
+      "duration": "06h 35m",
+      "reference": "REDACTED",
+      "stops": "Nonstop",
+      "flightCode": "W95331",
+      "carrierText": "Operated by W9",
+      "currency": "GBP",
+      "fare": "0.00",
+      "totalPrice": "0.00",
+      "availableSeats": null,
+      "displayPrice": 0,
+      "priceTag": "wizzair.subscriptions.availability.results.price.tag.premium",
+      "isFree": "false",
+      "flightId": "5331",
+      "actionText": "Select",
+      "departureOffsetText": "UTC+1",
+      "arrivalOffsetText": "UTC+3"
+    }
+  ],
+  "flightsInbound": []
+}

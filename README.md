@@ -54,7 +54,13 @@ Search. The first run has no availability data, so it returns the exact AYCF che
 wizz-finder search --from LTN,STN --to TIA --date 2026-09-08 --near-to 150
 ```
 
-Check those routes on multipass.wizzair.com and record what you saw in a file
+Either let the tool check them on the portal for you (see **Live availability** below):
+
+```bash
+wizz-finder search --from LTN,STN --to TIA --date 2026-09-08 --near-to 150 --portal
+```
+
+or check them by hand on multipass.wizzair.com and record what you saw in a file
 (see `examples/availability.example.json`):
 
 ```json
@@ -83,14 +89,36 @@ Output is a ranked list of options; you pick. Useful flags:
 | `--aycf-fee` | 9.99 | flat fee per AYCF leg |
 | `--json` | | machine-readable output |
 
+## Live availability (`--portal`)
+
+The All You Can Fly fare is only visible to a logged-in subscriber, so the tool drives a
+real Chromium through Playwright and asks the portal's own search endpoint, one route-day
+at a time, with a pause between requests. Answers are cached for 30 minutes.
+
+```bash
+pip install playwright && playwright install chromium
+cp .env.example .env            # optional: WIZZ_EMAIL / WIZZ_PASSWORD for automatic login
+wizz-finder login               # or: log in once by hand; the browser profile keeps the session
+wizz-finder search --from LTN --to TIA --date 2026-09-08 --portal
+```
+
+- Credentials live only in `.env`, which is git-ignored, and are used only to fill the
+  portal's login form. The saved browser profile in `.cache/` also holds your session:
+  treat both as private.
+- The subscription id in the search URL is picked up from the portal after login. If that
+  fails, set `WIZZ_SUBSCRIPTION_ID` in `.env` (`wizz-finder record-portal` prints it).
+- `--availability file.json` and `--portal` can be combined; the file is consulted first.
+- `--headed` shows the browser, which helps when the login flow changes.
+
 ## Limits of this version
 
 - Two legs at most, same-airport connections only.
 - Ryanair is the only automatic fare source, and it returns the cheapest flight per day,
   not every flight. Add other airlines through `--fares`.
-- AYCF availability is entered by hand. `wizz-finder record-portal` opens the portal in a
-  real browser and records its API traffic, which is the groundwork for automating that
-  step (needs `pip install playwright && playwright install chromium`).
+- The live portal check has been built from a recorded session and unit-tested against
+  it, but the automatic login form fill and the "no flights" response have not been
+  exercised end to end. If something changes on the portal, `wizz-finder record-portal`
+  records its traffic so the parser can be updated.
 - Prices are assumed to be in one currency (`--currency`, default GBP).
 
 ## Tests
